@@ -1,10 +1,17 @@
 from dataclasses import dataclass
+import logging
 import os
 
 from dotenv import load_dotenv
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# The standard hosted Bot API currently accepts uploads up to 50 MB.
+# Keep a small margin for the configured limit and future transport changes.
+STANDARD_BOT_API_MAX_FILE_SIZE_MB = 49
 
 
 @dataclass(
@@ -70,6 +77,20 @@ def _get_optional_string(
     return value
 
 
+def _get_file_size_limit_mb() -> int:
+    requested = _get_int("MAX_FILE_SIZE_MB", STANDARD_BOT_API_MAX_FILE_SIZE_MB)
+    if requested < 1:
+        raise RuntimeError("MAX_FILE_SIZE_MB должен быть не меньше 1")
+    if requested > STANDARD_BOT_API_MAX_FILE_SIZE_MB:
+        logger.warning(
+            "MAX_FILE_SIZE_MB=%s превышает предел обычного Bot API; "
+            "использую %s МБ",
+            requested,
+            STANDARD_BOT_API_MAX_FILE_SIZE_MB,
+        )
+    return min(requested, STANDARD_BOT_API_MAX_FILE_SIZE_MB)
+
+
 BOT_TOKEN = os.getenv(
     "BOT_TOKEN"
 )
@@ -94,10 +115,7 @@ settings = AppSettings(
         1800,
     ),
 
-    max_file_size_mb=_get_int(
-        "MAX_FILE_SIZE_MB",
-        200,
-    ),
+    max_file_size_mb=_get_file_size_limit_mb(),
 
     max_concurrent_downloads=_get_int(
         "MAX_CONCURRENT_DOWNLOADS",
