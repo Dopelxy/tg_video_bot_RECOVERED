@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+temp_downloads/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Python and editor
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+*.bak
+tgsavebot.zip
