@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -49,16 +50,30 @@ class MainWindow(QMainWindow):
         self._last_log = None
         self._agent_process: subprocess.Popen | None = None
         self._agent_start_error: str | None = None
+        self._exit_confirmed = False
 
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
         root = QWidget()
-        self.setCentralWidget(root)
+        self.tabs.addTab(root, "Управление")
+        bot_picker = QWidget()
+        self.tabs.addTab(bot_picker, "Выбор бота · скоро")
+        self.tabs.setTabEnabled(1, False)
+        self.tabs.setTabToolTip(1, "Здесь появится выбор бота для управления")
         layout = QVBoxLayout(root)
         layout.setContentsMargins(28, 25, 28, 25)
         layout.setSpacing(18)
 
         title = QLabel("TELEGRAM MEDIA BOT")
         title.setObjectName("title")
-        layout.addWidget(title)
+        header = QHBoxLayout()
+        header.addWidget(title)
+        header.addStretch()
+        self.exit_button = QPushButton("Выход")
+        self.exit_button.setObjectName("exit")
+        self.exit_button.setFixedWidth(95)
+        header.addWidget(self.exit_button)
+        layout.addLayout(header)
         subtitle = QLabel("Локальное управление")
         subtitle.setObjectName("subtitle")
         layout.addWidget(subtitle)
@@ -67,8 +82,11 @@ class MainWindow(QMainWindow):
         self.service_label.setObjectName("card")
         self.bot_label = QLabel("Бот: состояние неизвестно")
         self.bot_label.setObjectName("card")
+        self.telegram_label = QLabel("Telegram API: ожидаю данные…")
+        self.telegram_label.setObjectName("card")
         layout.addWidget(self.service_label)
         layout.addWidget(self.bot_label)
+        layout.addWidget(self.telegram_label)
 
         controls = QHBoxLayout()
         controls.setSpacing(12)
@@ -81,6 +99,9 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.stop_button)
         controls.addWidget(self.refresh_button)
         layout.addLayout(controls)
+        self.checked_label = QLabel("Ручная проверка: ещё не выполнялась")
+        self.checked_label.setObjectName("subtitle")
+        layout.addWidget(self.checked_label)
 
         log_title = QLabel("ЖУРНАЛ")
         log_title.setObjectName("section")
@@ -92,7 +113,8 @@ class MainWindow(QMainWindow):
 
         self.start_button.clicked.connect(lambda: self.run_command("start"))
         self.stop_button.clicked.connect(lambda: self.run_command("stop"))
-        self.refresh_button.clicked.connect(self.refresh)
+        self.refresh_button.clicked.connect(lambda: self.run_command("probe"))
+        self.exit_button.clicked.connect(lambda: self.run_command("shutdown"))
 
         self.setStyleSheet("""
             QWidget { background: #11151f; color: #e9eef9;
@@ -104,6 +126,12 @@ class MainWindow(QMainWindow):
                              font-weight: 700; }
             QLabel#card { background: #1c2534; border: 1px solid #33445e;
                           border-radius: 11px; padding: 15px; font-size: 17px; }
+            QTabWidget::pane { border: none; }
+            QTabBar::tab { background: #1c2534; color: #aab8cc;
+                           padding: 10px 18px; margin-right: 4px;
+                           border-top-left-radius: 8px; border-top-right-radius: 8px; }
+            QTabBar::tab:selected { background: #29364a; color: #79d9ff; }
+            QTabBar::tab:disabled { background: #171d28; color: #687487; }
             QPushButton { padding: 12px 16px; border-radius: 9px;
                           background: #29364a; font-weight: 600; }
             QPushButton:hover { background: #38526b; }
@@ -112,6 +140,9 @@ class MainWindow(QMainWindow):
             QPushButton#start:hover { background: #229c94; }
             QPushButton#stop { background: #74424a; }
             QPushButton#stop:hover { background: #94515b; }
+            QPushButton#exit { padding: 7px 10px; font-size: 12px;
+                               background: #343b4b; }
+            QPushButton#exit:hover { background: #74424a; }
             QPlainTextEdit { background: #0c1119; border: 1px solid #33445e;
                              border-radius: 9px; padding: 10px;
                              font-family: 'Consolas'; font-size: 12px; }
@@ -163,6 +194,13 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
+        self.exit_button.setEnabled(False)
+        if command == "probe":
+            self.checked_label.setText("Ручная проверка: выполняется…")
+            self.telegram_label.setText("Telegram API: проверяю сейчас…")
+        elif command == "shutdown":
+            self._exit_confirmed = False
+            self.checked_label.setText("Выход: останавливаю бота и службу…")
         worker = CommandThread(command)
         self._worker = worker
         worker.result.connect(self._on_result)
@@ -170,18 +208,50 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_result(self, response: dict) -> None:
+        checking = self._worker is not None and self._worker.command == "probe"
+        shutting_down = self._worker is not None and self._worker.command == "shutdown"
+        if shutting_down:
+            self._exit_confirmed = bool(response.get("ok")) and response.get("launcher_pid") is None
+            if not self._exit_confirmed:
+                reason = response.get("error") or "Не удалось подтвердить остановку"
+                self.checked_label.setText(f"Выход не выполнен: {reason}")
         if not response.get("ok"):
             self.service_label.setText("Служба: ошибка команды")
             self.bot_label.setText(response.get("error", "Состояние неизвестно"))
+            if checking:
+                self.checked_label.setText("Ручная проверка: не удалась")
+                self.telegram_label.setText("Telegram API: состояние неизвестно")
         else:
             pid = response.get("launcher_pid")
             self.bot_label.setText(
                 f"Бот: launcher работает · PID {pid}" if pid else "Бот: остановлен"
             )
+            if checking:
+                self.checked_label.setText(f"Ручная проверка: {response['checked_at']}")
+                state = response.get("telegram_api")
+                if not pid:
+                    self.telegram_label.setText("Telegram API: бот остановлен")
+                elif state == "reachable":
+                    username = response.get("bot_username") or "бот"
+                    self.telegram_label.setText(f"Telegram API: доступен · @{username}")
+                else:
+                    self.telegram_label.setText("Telegram API: нет ответа при ручной проверке")
 
     def _on_finished(self) -> None:
+        was_probe = self._worker is not None and self._worker.command == "probe"
+        was_shutdown = self._worker is not None and self._worker.command == "shutdown"
         self._worker = None
-        self.refresh()
+        if was_shutdown and self._exit_confirmed:
+            self.timer.stop()
+            self.close()
+            return
+        if was_probe:
+            self.refresh_button.setEnabled(True)
+            self.start_button.setEnabled(self.bot_label.text() == "Бот: остановлен")
+            self.stop_button.setEnabled(self.bot_label.text().startswith("Бот: launcher работает"))
+        else:
+            self.refresh()
+        self.exit_button.setEnabled(True)
 
     def refresh(self) -> None:
         if self._worker is not None:
@@ -190,6 +260,7 @@ class MainWindow(QMainWindow):
             status = request(PROJECT_DIR, "status")
         except Exception as error:
             self.service_label.setText("Служба: нет соединения")
+            self.telegram_label.setText("Telegram API: состояние неизвестно")
             if self._agent_start_error is not None:
                 detail = self._agent_start_error
             elif self._agent_process is not None and self._agent_process.poll() is None:
@@ -206,6 +277,16 @@ class MainWindow(QMainWindow):
             self.bot_label.setText(
                 f"Бот: launcher работает · PID {pid}" if pid else "Бот: остановлен"
             )
+            api_state = status.get("telegram_api")
+            if not pid:
+                self.telegram_label.setText("Telegram API: бот остановлен")
+            elif api_state == "reachable":
+                username = status.get("bot_username") or "бот"
+                self.telegram_label.setText(f"Telegram API: доступен · @{username}")
+            elif api_state == "unreachable":
+                self.telegram_label.setText("Telegram API: нет ответа при последней проверке")
+            else:
+                self.telegram_label.setText("Telegram API: проверяю / бот перезапускается")
             self.start_button.setEnabled(pid is None)
             self.stop_button.setEnabled(pid is not None)
         self.refresh_button.setEnabled(True)

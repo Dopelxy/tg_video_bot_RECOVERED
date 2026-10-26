@@ -12,6 +12,7 @@ from app.models.media import (
 from app.services.progress import (
     DownloadProgress,
 )
+from app.services.download_worker_process import run_download_worker, WorkerError
 
 
 class UnsupportedUrlError(ValueError):
@@ -231,15 +232,19 @@ class YouTubeDownloader:
             exist_ok=True,
         )
 
-        video_path = (
-            await asyncio.to_thread(
-                self._download_video_sync,
-                url,
-                max_height,
-                output_dir,
-                progress,
+        try:
+            video_path = await run_download_worker(
+                "youtube_video", url=url, max_height=max_height,
+                output_dir=output_dir, progress=progress,
             )
-        )
+        except WorkerError as error:
+            if str(error) == "YouTubeDurationLimitError":
+                raise YouTubeDurationLimitError(
+                    "Видео превышает разрешённую длительность"
+                ) from error
+            raise YouTubeMetadataError("Не удалось скачать видео") from error
+        except RuntimeError as error:
+            raise YouTubeMetadataError("Не удалось скачать видео") from error
 
         self._validate_file_size(
             video_path
@@ -264,14 +269,19 @@ class YouTubeDownloader:
             exist_ok=True,
         )
 
-        audio_path = (
-            await asyncio.to_thread(
-                self._download_audio_sync,
-                url,
-                output_dir,
-                progress,
+        try:
+            audio_path = await run_download_worker(
+                "youtube_audio", url=url, max_height=None,
+                output_dir=output_dir, progress=progress,
             )
-        )
+        except WorkerError as error:
+            if str(error) == "YouTubeDurationLimitError":
+                raise YouTubeDurationLimitError(
+                    "Видео превышает разрешённую длительность"
+                ) from error
+            raise YouTubeMetadataError("Не удалось скачать аудио") from error
+        except RuntimeError as error:
+            raise YouTubeMetadataError("Не удалось скачать аудио") from error
 
         self._validate_file_size(
             audio_path

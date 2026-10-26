@@ -290,6 +290,7 @@ def main() -> None:
                     "Код=%s",
                     exit_code,
                 )
+                clear_old_heartbeat()
 
                 (
                     process,

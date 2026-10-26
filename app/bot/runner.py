@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 
 from aiogram import (
     Bot,
@@ -11,6 +12,7 @@ from aiogram.client.session.aiohttp import (
 
 from app.config.app_settings import settings
 from app.services.heartbeat import heartbeat_loop
+from app.services.runtime_status import publish_status, clear_status
 
 
 logging.basicConfig(
@@ -37,6 +39,7 @@ async def run_bot(
     heartbeat_task: (
         asyncio.Task | None
     ) = None
+    instance_id = uuid.uuid4().hex
 
     try:
         me = await bot.get_me()
@@ -51,9 +54,14 @@ async def run_bot(
             "Жду сообщения..."
         )
 
+        publish_status(
+            instance_id,
+            reachable=True,
+            username=me.username or "",
+        )
         heartbeat_task = (
             asyncio.create_task(
-                heartbeat_loop()
+                heartbeat_loop(bot, instance_id, me.username or "")
             )
         )
 
@@ -71,4 +79,5 @@ async def run_bot(
             except asyncio.CancelledError:
                 pass
 
+        clear_status(instance_id)
         await bot.session.close()
