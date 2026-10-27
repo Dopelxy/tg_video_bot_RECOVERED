@@ -57,6 +57,7 @@ def main() -> None:
             if request["action"].endswith("metadata"):
                 info = downloader._extract_info_sync(url)
                 fields = ("id", "title", "uploader", "channel", "creator", "duration", "webpage_url",
+                          "channel_url", "uploader_url",
                           "vcodec", "filesize", "filesize_approx", "entries", "formats")
                 info = {k: v for k, v in info.items() if k in fields}
                 info["entries"] = bool(info.get("entries"))

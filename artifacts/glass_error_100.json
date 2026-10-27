@@ -1,0 +1,124 @@
+{
+  "width": 1366,
+  "height": 768,
+  "dpr": 1.0,
+  "blur": false,
+  "scale": 1.0,
+  "scenario": "error",
+  "renderer": "GraphicsApi.Software",
+  "manual_busy": false,
+  "command_label": "Готов к работе",
+  "items": {
+    "floatingNavigation": {
+      "x": 22.0,
+      "y": 22.0,
+      "width": 200.0,
+      "height": 724.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 22.0,
+      "scene_y": 22.0
+    },
+    "controlPanel": {
+      "x": 0.0,
+      "y": 358.0,
+      "width": 1084.0,
+      "height": 112.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 248.0,
+      "scene_y": 380.0
+    },
+    "journalPanel": {
+      "x": 0.0,
+      "y": 542.0,
+      "width": 1084.0,
+      "height": 130.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 248.0,
+      "scene_y": 564.0
+    },
+    "botTitle": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 908.0,
+      "height": 31.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 328.0,
+      "scene_y": 142.0
+    },
+    "startButton": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 152.0,
+      "height": 44.0,
+      "visible": true,
+      "enabled": false,
+      "scene_x": 265.0,
+      "scene_y": 429.0
+    },
+    "stopButton": {
+      "x": 162.0,
+      "y": 0.0,
+      "width": 152.0,
+      "height": 44.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 427.0,
+      "scene_y": 429.0
+    },
+    "refreshButton": {
+      "x": 324.0,
+      "y": 0.0,
+      "width": 152.0,
+      "height": 44.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 589.0,
+      "scene_y": 429.0
+    },
+    "exitButton": {
+      "x": 1000.0,
+      "y": 9.0,
+      "width": 84.0,
+      "height": 34.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 1248.0,
+      "scene_y": 31.0
+    },
+    "futureBotsTab": {
+      "x": 0.0,
+      "y": 136.0,
+      "width": 164.0,
+      "height": 46.0,
+      "visible": true,
+      "enabled": false,
+      "scene_x": 40.0,
+      "scene_y": 176.0
+    },
+    "commandSpinner": {
+      "x": 851.0,
+      "y": 0.0,
+      "width": 18.0,
+      "height": 18.0,
+      "visible": false,
+      "enabled": true,
+      "scene_x": 1116.0,
+      "scene_y": 398.0
+    },
+    "mainScroll": {
+      "x": 248.0,
+      "y": 22.0,
+      "width": 1096.0,
+      "height": 724.0,
+      "visible": true,
+      "enabled": true,
+      "scene_x": 248.0,
+      "scene_y": 22.0
+    }
+  },
+  "glass_sources": []
+}

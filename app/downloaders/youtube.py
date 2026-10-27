@@ -16,6 +16,7 @@ from app.services.download_worker_process import run_download_worker, WorkerErro
 from app.services.download_coordinator import download_coordinator
 from app.services.media_files import download_options
 from app.paths import TEMP_ROOT
+from app.services.video_caption import platform_url
 
 
 def normalize_height(value):
@@ -126,6 +127,7 @@ class YouTubeDownloader:
             ),
             uploader=(
                 info.get("uploader")
+                or info.get("channel")
             ),
             duration=(
                 info.get("duration")
@@ -134,6 +136,8 @@ class YouTubeDownloader:
                 info.get("webpage_url")
                 or url
             ),
+            channel_url=platform_url(info.get("channel_url"), "youtube", author=True),
+            uploader_url=platform_url(info.get("uploader_url"), "youtube", author=True),
         )
 
     async def get_formats(

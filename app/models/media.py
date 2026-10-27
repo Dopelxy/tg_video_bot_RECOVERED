@@ -7,6 +7,8 @@ class MediaMetadata:
     uploader: str | None
     duration: int | None
     webpage_url: str
+    channel_url: str | None = None
+    uploader_url: str | None = None
 
 
 @dataclass(slots=True)

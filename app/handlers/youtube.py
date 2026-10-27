@@ -30,6 +30,7 @@ from app.services.job_files import current_job, with_job
 from app.services.telegram_io import edit_status, delivery_error
 from aiogram.exceptions import TelegramAPIError
 from app.services.worker_errors import WorkerError
+from app.services.video_caption import video_caption
 
 
 router = Router()
@@ -129,7 +130,7 @@ def build_quality_keyboard(
 def get_request(
     request_id: str,
     user_id: int,
-) -> dict[str, str | int] | None:
+) -> dict[str, str | int | None] | None:
     request_data = youtube_requests.get(
         request_id
     )
@@ -176,6 +177,9 @@ async def youtube_link_handler(
             "user_id": message.from_user.id,
             "url": url,
             "title": metadata.title,
+            "channel_url": getattr(metadata, "channel_url", None),
+            "uploader_url": getattr(metadata, "uploader_url", None),
+            "webpage_url": getattr(metadata, "webpage_url", None),
             "uploader": (
                 metadata.uploader
                 or "неизвестен"
@@ -386,13 +390,16 @@ async def youtube_quality_handler(
         async with download_coordinator.upload_semaphore:
             await callback.message.answer_video(
                 video=video_file,
-                caption=(
-                    f"🎬 {title}\n"
-                    f"📺 Качество: {height}p\n"
-                    "\n"
-                    f"◆ {bot_identity.name}\n"
-                    f"{bot_identity.username_with_at}"
+                caption=video_caption(
+                    platform="youtube", title=title,
+                    author=request_data.get("uploader"),
+                    channel_url=request_data.get("channel_url"),
+                    uploader_url=request_data.get("uploader_url"),
+                    webpage_url=request_data.get("webpage_url"), source_url=url,
+                    quality=f"{height}p", bot_name=bot_identity.name,
+                    bot_username=bot_identity.username,
                 ),
+                parse_mode="HTML",
                 request_timeout=600,
             )
 

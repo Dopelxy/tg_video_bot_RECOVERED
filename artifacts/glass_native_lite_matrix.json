@@ -1,0 +1,26 @@
+[
+  {
+    "state": "running",
+    "scale": 1.0,
+    "dpr": 1.0,
+    "blur": false,
+    "renderer": "GraphicsApi.Direct3D11",
+    "screenshot": "artifacts/glass_native_lite_100.png"
+  },
+  {
+    "state": "running",
+    "scale": 1.25,
+    "dpr": 1.25,
+    "blur": false,
+    "renderer": "GraphicsApi.Direct3D11",
+    "screenshot": "artifacts/glass_native_lite_125.png"
+  },
+  {
+    "state": "running",
+    "scale": 1.5,
+    "dpr": 1.5,
+    "blur": false,
+    "renderer": "GraphicsApi.Direct3D11",
+    "screenshot": "artifacts/glass_native_lite_150.png"
+  }
+]

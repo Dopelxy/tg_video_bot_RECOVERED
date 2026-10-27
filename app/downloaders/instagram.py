@@ -12,6 +12,7 @@ from app.services.download_worker_process import run_download_worker
 from app.services.worker_errors import WorkerError
 from app.services.media_files import download_options
 from app.services.progress import DownloadProgress
+from app.services.video_caption import platform_url
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ class InstagramMetadata:
     duration: int | None
     webpage_url: str
     media_type: str
+    channel_url: str | None = None
+    uploader_url: str | None = None
 
 
 class InstagramDownloader:
@@ -441,6 +444,8 @@ class InstagramDownloader:
             duration=duration,
             webpage_url=webpage_url,
             media_type=media_type,
+            channel_url=platform_url(info.get("channel_url"), "instagram", author=True),
+            uploader_url=platform_url(info.get("uploader_url"), "instagram", author=True),
         )
 
     def _validate_duration(

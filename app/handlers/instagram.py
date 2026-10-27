@@ -30,6 +30,7 @@ from app.services.job_files import current_job, with_job
 from app.services.telegram_io import edit_status, StatusEditor, delivery_error
 from aiogram.exceptions import TelegramAPIError
 from app.services.worker_errors import WorkerError
+from app.services.video_caption import video_caption
 
 
 router = Router()
@@ -370,14 +371,15 @@ async def instagram_link_handler(
         async with download_coordinator.upload_semaphore:
             await message.answer_video(
                 video=video_file,
-                caption=(
-                    "📸 Instagram\n"
-                    f"👤 "
-                    f"{metadata.uploader or 'Instagram'}\n"
-                    "\n"
-                    f"◆ {bot_identity.name}\n"
-                    f"{bot_identity.username_with_at}"
+                caption=video_caption(
+                    platform="instagram", title=getattr(metadata, "title", "Instagram"),
+                    author=metadata.uploader or "Instagram",
+                    channel_url=getattr(metadata, "channel_url", None),
+                    uploader_url=getattr(metadata, "uploader_url", None),
+                    webpage_url=getattr(metadata, "webpage_url", None), source_url=url,
+                    bot_name=bot_identity.name, bot_username=bot_identity.username,
                 ),
+                parse_mode="HTML",
                 request_timeout=600,
             )
 
