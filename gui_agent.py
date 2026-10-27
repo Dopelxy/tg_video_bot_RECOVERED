@@ -38,7 +38,7 @@ class CommandThread(QThread):
         try:
             self.result.emit(request(PROJECT_DIR, self.command))
         except Exception as error:
-            self.result.emit({"ok": False, "error": str(error)})
+            self.result.emit({"ok": False, "error": type(error).__name__})
 
 
 class MainWindow(QMainWindow):
@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self._agent_process: subprocess.Popen | None = None
         self._agent_start_error: str | None = None
         self._exit_confirmed = False
+        self._agent_attempted = False
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -152,16 +153,12 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(2000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
-        self._ensure_agent()
         self.refresh()
 
     def _ensure_agent(self) -> None:
-        try:
-            request(PROJECT_DIR, "status")
+        if self._agent_attempted:
             return
-        except (OSError, EOFError, ConnectionError):
-            pass
-
+        self._agent_attempted = True
         data_dir = PROJECT_DIR / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         options: dict = {}
@@ -208,6 +205,16 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_result(self, response: dict) -> None:
+        if self._worker is not None and self._worker.command == "status":
+            if response.get("ok"):
+                self._apply_status(response)
+            else:
+                self.service_label.setText("Служба: нет соединения")
+                self.start_button.setEnabled(False)
+                self.stop_button.setEnabled(False)
+                self._ensure_agent()
+            self._refresh_log()
+            return
         checking = self._worker is not None and self._worker.command == "probe"
         shutting_down = self._worker is not None and self._worker.command == "shutdown"
         if shutting_down:
@@ -238,6 +245,7 @@ class MainWindow(QMainWindow):
                     self.telegram_label.setText("Telegram API: нет ответа при ручной проверке")
 
     def _on_finished(self) -> None:
+        was_status = self._worker is not None and self._worker.command == "status"
         was_probe = self._worker is not None and self._worker.command == "probe"
         was_shutdown = self._worker is not None and self._worker.command == "shutdown"
         self._worker = None
@@ -245,7 +253,9 @@ class MainWindow(QMainWindow):
             self.timer.stop()
             self.close()
             return
-        if was_probe:
+        if was_status:
+            self.refresh_button.setEnabled(True)
+        elif was_probe:
             self.refresh_button.setEnabled(True)
             self.start_button.setEnabled(self.bot_label.text() == "Бот: остановлен")
             self.stop_button.setEnabled(self.bot_label.text().startswith("Бот: launcher работает"))
@@ -254,43 +264,28 @@ class MainWindow(QMainWindow):
         self.exit_button.setEnabled(True)
 
     def refresh(self) -> None:
-        if self._worker is not None:
-            return
-        try:
-            status = request(PROJECT_DIR, "status")
-        except Exception as error:
-            self.service_label.setText("Служба: нет соединения")
-            self.telegram_label.setText("Telegram API: состояние неизвестно")
-            if self._agent_start_error is not None:
-                detail = self._agent_start_error
-            elif self._agent_process is not None and self._agent_process.poll() is None:
-                detail = "Запускается…"
-            else:
-                detail = f"Не удалось подключиться: {error}"
-            self.bot_label.setText(detail)
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(False)
+        if self._worker is None:
+            self.run_command("status")
+
+    def _apply_status(self, status: dict) -> None:
+        self._agent_start_error = None
+        self.service_label.setText("Служба: подключена к этому ПК")
+        pid = status.get("launcher_pid")
+        self.bot_label.setText(
+            f"Бот: launcher работает · PID {pid}" if pid else "Бот: остановлен"
+        )
+        api_state = status.get("telegram_api")
+        if not pid:
+            self.telegram_label.setText("Telegram API: бот остановлен")
+        elif api_state == "reachable":
+            username = status.get("bot_username") or "бот"
+            self.telegram_label.setText(f"Telegram API: доступен · @{username}")
+        elif api_state == "unreachable":
+            self.telegram_label.setText("Telegram API: нет ответа при последней проверке")
         else:
-            self._agent_start_error = None
-            self.service_label.setText("Служба: подключена к этому ПК")
-            pid = status.get("launcher_pid")
-            self.bot_label.setText(
-                f"Бот: launcher работает · PID {pid}" if pid else "Бот: остановлен"
-            )
-            api_state = status.get("telegram_api")
-            if not pid:
-                self.telegram_label.setText("Telegram API: бот остановлен")
-            elif api_state == "reachable":
-                username = status.get("bot_username") or "бот"
-                self.telegram_label.setText(f"Telegram API: доступен · @{username}")
-            elif api_state == "unreachable":
-                self.telegram_label.setText("Telegram API: нет ответа при последней проверке")
-            else:
-                self.telegram_label.setText("Telegram API: проверяю / бот перезапускается")
-            self.start_button.setEnabled(pid is None)
-            self.stop_button.setEnabled(pid is not None)
-        self.refresh_button.setEnabled(True)
-        self._refresh_log()
+            self.telegram_label.setText("Telegram API: проверяю / бот перезапускается")
+        self.start_button.setEnabled(pid is None)
+        self.stop_button.setEnabled(pid is not None)
 
     def _refresh_log(self) -> None:
         log_path = PROJECT_DIR / "data" / "runtime.log"

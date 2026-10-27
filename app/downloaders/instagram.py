@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,7 +6,11 @@ from urllib.parse import urlparse
 from yt_dlp import YoutubeDL
 
 from app.config.app_settings import settings
-from app.config.app_settings import settings
+from app.paths import TEMP_ROOT
+from app.services.download_coordinator import download_coordinator
+from app.services.download_worker_process import run_download_worker
+from app.services.worker_errors import WorkerError
+from app.services.media_files import download_options
 from app.services.progress import DownloadProgress
 
 
@@ -121,12 +124,11 @@ class InstagramDownloader:
             )
 
         try:
-            info = await asyncio.to_thread(
-                self._extract_info_sync,
-                url,
-            )
+            async with download_coordinator.metadata_semaphore:
+                info = await run_download_worker("instagram_metadata", url=url,
+                    output_dir=TEMP_ROOT, max_height=None, progress=None, timeout=60)
 
-        except InstagramError:
+        except (InstagramError, WorkerError):
             raise
 
         except Exception as error:
@@ -181,12 +183,8 @@ class InstagramDownloader:
             )
 
         try:
-            video_path = await asyncio.to_thread(
-                self._download_video_sync,
-                url,
-                output_dir,
-                progress,
-            )
+            video_path = await run_download_worker("instagram_video", url=url,
+                output_dir=output_dir, max_height=None, progress=progress)
 
             self._validate_downloaded_file_size(
                 video_path
@@ -194,7 +192,7 @@ class InstagramDownloader:
 
             return video_path
 
-        except InstagramError:
+        except (InstagramError, WorkerError):
             raise
 
         except Exception as error:
@@ -216,6 +214,7 @@ class InstagramDownloader:
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
+            "socket_timeout": 20, "retries": 2, "fragment_retries": 2,
             "noplaylist": True,
         }
 
@@ -267,6 +266,9 @@ class InstagramDownloader:
                 )
             ]
 
+        budget = download_options(output_dir)
+        options["progress_hooks"] = budget.pop("progress_hooks") + options.get("progress_hooks", [])
+        options.update(budget)
         with YoutubeDL(
             options
         ) as ydl:

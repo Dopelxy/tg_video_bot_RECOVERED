@@ -7,6 +7,13 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+import logging
+
+from app.paths import PROJECT_DIR
+from app.services.process_tree import WindowsJob, entry_command
+from app.services.worker_errors import WorkerError
+
+logger = logging.getLogger(__name__)
 
 
 WORKER_MODULE = "app.downloaders.worker"
@@ -14,68 +21,67 @@ DOWNLOAD_TIMEOUT_SECONDS = 1800
 
 
 async def _stop_process_tree(process: asyncio.subprocess.Process) -> None:
-    if sys.platform == "win32" and process.returncode is not None:
-        return
-    if sys.platform == "win32":
-        try:
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/PID", str(process.pid), "/T", "/F",
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            await asyncio.wait_for(killer.wait(), timeout=10)
-            if killer.returncode != 0 and process.returncode is None:
-                process.kill()
-        except (OSError, asyncio.TimeoutError):
-            if process.returncode is None:
-                process.kill()
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     if process.returncode is not None:
         return
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except asyncio.TimeoutError:
-        if sys.platform == "win32":
-            process.kill()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         await process.wait()
 
 
 async def run_download_worker(
     action: str, *, url: str, output_dir: Path, max_height: int | None,
-    progress: object | None,
-) -> Path:
+    progress: object | None, timeout: float = DOWNLOAD_TIMEOUT_SECONDS,
+) -> Path | dict:
+    output_dir = output_dir.resolve()
+    job = WindowsJob()
     options = {"stdin": asyncio.subprocess.PIPE, "stdout": asyncio.subprocess.PIPE,
-               "stderr": subprocess.DEVNULL, "cwd": str(Path(__file__).resolve().parents[2])}
+               "stderr": subprocess.DEVNULL, "cwd": str(PROJECT_DIR), "limit": 2 * 1024 * 1024}
     if sys.platform == "win32":
-        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW | 0x00000004  # CREATE_SUSPENDED
     else:
         options["start_new_session"] = True
 
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", WORKER_MODULE, **options,
-    )
     try:
+        process = await asyncio.create_subprocess_exec(
+            *entry_command(module=WORKER_MODULE), **options,
+        )
+    except BaseException:
+        job.close()
+        raise
+    assigned = False
+    try:
+        job.assign(process.pid)
+        assigned = True
+        job.resume(process.pid)
         request = {"action": action, "url": url, "output_dir": str(output_dir),
                    "max_height": max_height}
-        process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+        process.stdin.write(("go\n" + json.dumps(request) + "\n").encode("utf-8"))
         await process.stdin.drain()
         process.stdin.close()
 
         async def read_result() -> Path:
             while True:
-                line = await process.stdout.readline()
+                try:
+                    line = await process.stdout.readline()
+                except ValueError:
+                    raise WorkerError("protocol") from None
                 if not line:
-                    raise RuntimeError("Процесс загрузки завершился без результата")
-                event = json.loads(line)
+                    raise WorkerError("worker_exit")
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError()
+                except (ValueError, UnicodeError):
+                    raise WorkerError("protocol") from None
                 if event.get("kind") == "progress":
                     if progress is not None:
                         if event.get("phase") == "download":
@@ -90,19 +96,42 @@ async def run_download_worker(
                 elif event.get("kind") == "result":
                     await process.wait()
                     if process.returncode != 0:
-                        raise RuntimeError("Процесс загрузки завершился с ошибкой")
-                    return Path(event["path"])
+                        raise WorkerError("worker_exit")
+                    if action.endswith("metadata"):
+                        if not isinstance(event.get("data"), dict):
+                            raise WorkerError("protocol")
+                        return event["data"]
+                    path = Path(event.get("path", "")).resolve()
+                    if path.parent != output_dir or not path.is_file():
+                        raise WorkerError("protocol")
+                    return path
                 elif event.get("kind") == "error":
-                    raise WorkerError(event.get("error_type", "RuntimeError"))
+                    error = WorkerError(event.get("code", "internal"), event.get("error_type", "unknown"))
+                    logger.warning("worker action=%s code=%s type=%s", action, error.code, error.error_type)
+                    raise error
+                else:
+                    raise WorkerError("protocol")
 
         try:
-            return await asyncio.wait_for(read_result(), timeout=DOWNLOAD_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("Превышено время загрузки") from exc
+            return await asyncio.wait_for(read_result(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise WorkerError("timeout") from None
     finally:
         # Also runs when the Telegram handler is cancelled.
-        await asyncio.shield(_stop_process_tree(process))
-
-
-class WorkerError(RuntimeError):
-    """A typed, deliberately non-secret error returned by the child."""
+        async def finish():
+            if sys.platform == "win32":
+                if not assigned and process.returncode is None:
+                    process.kill()
+                try:
+                    await asyncio.to_thread(job.stop, 10)
+                finally:
+                    job.close()
+                    await asyncio.wait_for(process.wait(), timeout=10)
+            else:
+                await _stop_process_tree(process)
+        cleanup = asyncio.create_task(finish())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise

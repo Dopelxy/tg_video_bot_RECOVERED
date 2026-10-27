@@ -80,6 +80,16 @@ class ProcessOutputThread(QThread):
                 )
 
 
+class StatsReadThread(QThread):
+    result = Signal(object)
+
+    def run(self):
+        try:
+            self.result.emit(stats_storage.get_stats())
+        except Exception:
+            self.result.emit(None)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +101,8 @@ class MainWindow(QMainWindow):
         self.output_thread: (
             ProcessOutputThread | None
         ) = None
+
+        self._stats_thread = None
 
         self.started_at: (
             datetime | None
@@ -420,16 +432,20 @@ class MainWindow(QMainWindow):
     def update_stats(
         self,
     ) -> None:
-        try:
-            stats = stats_storage.get_stats()
-
-        except Exception as error:
-            self.add_log(
-                "Ошибка чтения статистики: "
-                f"{error}"
-            )
+        if self._stats_thread is not None:
             return
+        self._stats_thread = StatsReadThread(self)
+        self._stats_thread.result.connect(self._apply_stats)
+        self._stats_thread.finished.connect(self._stats_finished)
+        self._stats_thread.start()
 
+    def _stats_finished(self):
+        self._stats_thread.deleteLater()
+        self._stats_thread = None
+
+    def _apply_stats(self, stats):
+        if stats is None:
+            return
         self.total_downloads_label.setText(
             str(stats.total_downloads)
         )
@@ -734,6 +750,9 @@ class MainWindow(QMainWindow):
         self,
         event,
     ) -> None:
+        if self._stats_thread is not None and self._stats_thread.isRunning():
+            event.ignore()
+            return
         self.stop_bot()
 
         event.accept()

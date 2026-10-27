@@ -1,7 +1,5 @@
 import logging
-import shutil
 import uuid
-from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.types import (
@@ -21,12 +19,17 @@ from app.downloaders.youtube import (
     YouTubeMetadataError,
 )
 from app.services.bot_identity import load_bot_identity
-from app.services.download_coordinator import download_coordinator
+from app.services.download_coordinator import download_coordinator, metadata_request
+from app.services.request_cache import RequestCache
 from app.services.progress import DownloadProgress
 from app.services.telegram_progress import (
     TelegramProgressUpdater,
 )
-from app.storage.stats import stats_storage
+from app.storage.stats import record_safely
+from app.services.job_files import current_job, with_job
+from app.services.telegram_io import edit_status, delivery_error
+from aiogram.exceptions import TelegramAPIError
+from app.services.worker_errors import WorkerError
 
 
 router = Router()
@@ -34,13 +37,8 @@ logger = logging.getLogger(__name__)
 
 youtube_downloader = YouTubeDownloader()
 
-TEMP_ROOT = Path("temp_downloads")
 
-
-youtube_requests: dict[
-    str,
-    dict[str, str | int],
-] = {}
+youtube_requests = RequestCache()
 
 
 def format_duration(
@@ -150,6 +148,7 @@ def get_request(
 
 
 @router.message(F.text)
+@metadata_request
 async def youtube_link_handler(
     message: Message,
 ) -> None:
@@ -169,17 +168,7 @@ async def youtube_link_handler(
     )
 
     try:
-        metadata = (
-            await youtube_downloader.get_metadata(
-                url
-            )
-        )
-
-        formats = (
-            await youtube_downloader.get_formats(
-                url
-            )
-        )
+        metadata, formats = await youtube_downloader.get_details(url)
 
         request_id = create_request_id()
 
@@ -220,19 +209,19 @@ async def youtube_link_handler(
             "Выбери качество:"
         )
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             response,
             reply_markup=keyboard,
         )
 
     except UnsupportedUrlError:
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Эта ссылка "
             "не поддерживается."
         )
 
     except YouTubeDurationLimitError:
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Видео слишком длинное."
             "\n\n"
             "Максимальная длительность: "
@@ -241,18 +230,21 @@ async def youtube_link_handler(
         )
 
     except YouTubeMetadataError:
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Не удалось получить "
             "информацию о видео."
         )
 
+    except WorkerError as error:
+        await edit_status(status_message, "\u274c " + str(error))
+
     except Exception:
-        logger.exception(
+        logger.error(
             "Неожиданная ошибка "
             "при получении метаданных YouTube"
         )
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Произошла "
             "внутренняя ошибка."
         )
@@ -261,6 +253,7 @@ async def youtube_link_handler(
 @router.callback_query(
     F.data.startswith("ytq:")
 )
+@with_job
 async def youtube_quality_handler(
     callback: CallbackQuery,
 ) -> None:
@@ -336,13 +329,7 @@ async def youtube_quality_handler(
         callback.bot
     )
 
-    job_id = uuid.uuid4().hex
-
-    output_dir = (
-        TEMP_ROOT
-        / str(user_id)
-        / job_id
-    )
+    output_dir = current_job.get()
 
     progress = DownloadProgress()
 
@@ -365,7 +352,7 @@ async def youtube_quality_handler(
     )
 
     if not download_coordinator.claim_user(user_id):
-        await status_message.edit_text(
+        await edit_status(status_message,
             "⏳ У тебя уже идёт загрузка. "
             "Дождись её завершения."
         )
@@ -396,18 +383,20 @@ async def youtube_quality_handler(
             video_path
         )
 
-        await callback.message.answer_video(
-            video=video_file,
-            caption=(
-                f"🎬 {title}\n"
-                f"📺 Качество: {height}p\n"
-                "\n"
-                f"◆ {bot_identity.name}\n"
-                f"{bot_identity.username_with_at}"
-            ),
-        )
+        async with download_coordinator.upload_semaphore:
+            await callback.message.answer_video(
+                video=video_file,
+                caption=(
+                    f"🎬 {title}\n"
+                    f"📺 Качество: {height}p\n"
+                    "\n"
+                    f"◆ {bot_identity.name}\n"
+                    f"{bot_identity.username_with_at}"
+                ),
+                request_timeout=600,
+            )
 
-        stats_storage.record_video_download(
+        await record_safely("record_video_download",
             file_size=file_size
         )
 
@@ -421,7 +410,7 @@ async def youtube_quality_handler(
         )
 
     except YouTubeDurationLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Видео слишком длинное"
@@ -429,7 +418,7 @@ async def youtube_quality_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Видео слишком длинное."
             "\n\n"
             "Максимальная длительность: "
@@ -438,7 +427,7 @@ async def youtube_quality_handler(
         )
 
     except YouTubeFileSizeLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Файл слишком большой"
@@ -446,7 +435,7 @@ async def youtube_quality_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Файл получился "
             "слишком большим."
             "\n\n"
@@ -455,7 +444,7 @@ async def youtube_quality_handler(
         )
 
     except YouTubeMetadataError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Не удалось скачать видео"
@@ -463,13 +452,23 @@ async def youtube_quality_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Не удалось "
             "скачать видео."
         )
 
+    except WorkerError as error:
+        await record_safely("record_failure")
+        progress.set_failed(str(error))
+        await edit_status(status_message, "\u274c " + str(error))
+
+    except TelegramAPIError as error:
+        await record_safely("record_failure")
+        progress.set_failed(delivery_error(error))
+        await edit_status(status_message, "\u274c " + delivery_error(error))
+
     except Exception:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Внутренняя ошибка"
@@ -477,12 +476,12 @@ async def youtube_quality_handler(
 
         await progress_updater.stop()
 
-        logger.exception(
+        logger.error(
             "Неожиданная ошибка "
             "при скачивании YouTube-видео"
         )
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Произошла "
             "внутренняя ошибка "
             "при обработке видео."
@@ -493,15 +492,11 @@ async def youtube_quality_handler(
 
         download_coordinator.release_user(user_id)
 
-        shutil.rmtree(
-            output_dir,
-            ignore_errors=True,
-        )
-
 
 @router.callback_query(
     F.data.startswith("yta:")
 )
+@with_job
 async def youtube_audio_handler(
     callback: CallbackQuery,
 ) -> None:
@@ -566,13 +561,7 @@ async def youtube_audio_handler(
         callback.bot
     )
 
-    job_id = uuid.uuid4().hex
-
-    output_dir = (
-        TEMP_ROOT
-        / str(user_id)
-        / job_id
-    )
+    output_dir = current_job.get()
 
     progress = DownloadProgress()
 
@@ -593,7 +582,7 @@ async def youtube_audio_handler(
     )
 
     if not download_coordinator.claim_user(user_id):
-        await status_message.edit_text(
+        await edit_status(status_message,
             "⏳ У тебя уже идёт загрузка. "
             "Дождись её завершения."
         )
@@ -623,23 +612,25 @@ async def youtube_audio_handler(
             audio_path
         )
 
-        await callback.message.answer_audio(
-            audio=audio_file,
-            title=title,
-            performer=(
-                uploader
-                or "YouTube"
-            ),
-            caption=(
-                f"🎵 {title}\n"
-                "🎧 Качество: MP3 • 192 kbps\n"
-                "\n"
-                f"◆ {bot_identity.name}\n"
-                f"{bot_identity.username_with_at}"
-            ),
-        )
+        async with download_coordinator.upload_semaphore:
+            await callback.message.answer_audio(
+                audio=audio_file,
+                title=title,
+                performer=(
+                    uploader
+                    or "YouTube"
+                ),
+                caption=(
+                    f"🎵 {title}\n"
+                    "🎧 Качество: MP3 • 192 kbps\n"
+                    "\n"
+                    f"◆ {bot_identity.name}\n"
+                    f"{bot_identity.username_with_at}"
+                ),
+                request_timeout=600,
+            )
 
-        stats_storage.record_audio_download(
+        await record_safely("record_audio_download",
             file_size=file_size
         )
 
@@ -653,7 +644,7 @@ async def youtube_audio_handler(
         )
 
     except YouTubeDurationLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Видео слишком длинное"
@@ -661,7 +652,7 @@ async def youtube_audio_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Видео слишком длинное."
             "\n\n"
             "Максимальная длительность: "
@@ -670,7 +661,7 @@ async def youtube_audio_handler(
         )
 
     except YouTubeFileSizeLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Аудиофайл слишком большой"
@@ -678,7 +669,7 @@ async def youtube_audio_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Аудиофайл получился "
             "слишком большим."
             "\n\n"
@@ -687,7 +678,7 @@ async def youtube_audio_handler(
         )
 
     except YouTubeMetadataError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Не удалось скачать аудио"
@@ -695,13 +686,23 @@ async def youtube_audio_handler(
 
         await progress_updater.stop()
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Не удалось "
             "скачать аудио."
         )
 
+    except WorkerError as error:
+        await record_safely("record_failure")
+        progress.set_failed(str(error))
+        await edit_status(status_message, "\u274c " + str(error))
+
+    except TelegramAPIError as error:
+        await record_safely("record_failure")
+        progress.set_failed(delivery_error(error))
+        await edit_status(status_message, "\u274c " + delivery_error(error))
+
     except Exception:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Внутренняя ошибка"
@@ -709,12 +710,12 @@ async def youtube_audio_handler(
 
         await progress_updater.stop()
 
-        logger.exception(
+        logger.error(
             "Неожиданная ошибка "
             "при скачивании YouTube-аудио"
         )
 
-        await status_message.edit_text(
+        await edit_status(status_message,
             "❌ Произошла "
             "внутренняя ошибка "
             "при обработке аудио."
@@ -724,8 +725,3 @@ async def youtube_audio_handler(
         await progress_updater.stop()
 
         download_coordinator.release_user(user_id)
-
-        shutil.rmtree(
-            output_dir,
-            ignore_errors=True,
-        )

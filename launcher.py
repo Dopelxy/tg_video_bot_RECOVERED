@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from app.config.app_settings import settings
+from app.services.process_tree import entry_command, popen_owned, stop_owned
 
 
 logging.basicConfig(
@@ -66,13 +67,10 @@ def start_bot() -> tuple[
         "Запускаю процесс бота..."
     )
 
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(MAIN_FILE),
-        ],
-        cwd=str(PROJECT_DIR),
+    process, process_job = popen_owned(
+        entry_command(path=MAIN_FILE), cwd=str(PROJECT_DIR),
     )
+    process._owned_job = process_job
 
     started_at = time.time()
 
@@ -90,30 +88,7 @@ def start_bot() -> tuple[
 def stop_bot(
     process: subprocess.Popen,
 ) -> None:
-    if process.poll() is not None:
-        return
-
-    logger.warning(
-        "Останавливаю процесс "
-        "бота PID=%s",
-        process.pid,
-    )
-
-    process.terminate()
-
-    try:
-        process.wait(
-            timeout=10
-        )
-
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "Бот не завершился. "
-            "Убиваю процесс."
-        )
-
-        process.kill()
-        process.wait()
+    stop_owned(process, process._owned_job)
 
 
 def heartbeat_is_stale(
@@ -224,6 +199,7 @@ def restart_bot(
     subprocess.Popen,
     float,
 ]:
+    stop_bot(process)
     if restart_limit_reached(
         restart_times
     ):
@@ -285,6 +261,9 @@ def main() -> None:
             exit_code = process.poll()
 
             if exit_code is not None:
+                if exit_code == 78:
+                    logger.error("Запуск отклонён: локальная блокировка экземпляра")
+                    return
                 logger.error(
                     "Процесс бота завершился. "
                     "Код=%s",

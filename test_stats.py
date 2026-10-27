@@ -1,5 +1,5 @@
 import unittest
-import uuid
+import tempfile
 from pathlib import Path
 
 from app.storage.stats import StatsStorage
@@ -7,7 +7,9 @@ from app.storage.stats import StatsStorage
 
 class TestStatsStorage(unittest.TestCase):
     def test_instagram_video_counts_toward_platform_and_media_totals(self) -> None:
-        db_path = Path("data") / f"stats_{uuid.uuid4().hex}.db"
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        db_path = Path(temporary.name) / "stats.db"
         storage = StatsStorage(
             db_path=db_path
         )

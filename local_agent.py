@@ -11,7 +11,7 @@ import secrets
 import sys
 from datetime import datetime, timezone
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client, Listener
+from app.services.local_ipc import Client, Listener
 from pathlib import Path
 
 from app.services.bot_process import BotProcess
@@ -100,7 +100,7 @@ def serve(project_dir: Path) -> None:
             while True:
                 try:
                     conn = listener.accept()
-                except (OSError, EOFError, AuthenticationError):
+                except (OSError, EOFError, AuthenticationError, ValueError):
                     continue
                 with conn:
                     try:
@@ -124,12 +124,12 @@ def serve(project_dir: Path) -> None:
                         conn.send(response)
                         if command == "shutdown" and response["ok"]:
                             return
-                    except (EOFError, BrokenPipeError):
+                    except (EOFError, OSError, ValueError):
                         continue
                     except Exception as error:
                         try:
-                            conn.send({"ok": False, "error": str(error)})
-                        except (EOFError, BrokenPipeError):
+                            conn.send({"ok": False, "error": "Ошибка службы: " + type(error).__name__})
+                        except (EOFError, OSError, ValueError):
                             pass
         finally:
             if not runtime.stop():

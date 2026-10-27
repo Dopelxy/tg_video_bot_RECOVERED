@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from app.services.telegram_io import StatusEditor
 
 from aiogram.types import Message
 
@@ -26,6 +27,7 @@ class TelegramProgressUpdater:
         update_interval: float = 1.0,
     ) -> None:
         self._message = message
+        self._editor = StatusEditor(message)
         self._progress = progress
         self._title = title
         self._format_name = format_name
@@ -118,12 +120,5 @@ class TelegramProgressUpdater:
         if text == self._last_text:
             return
 
-        try:
-            await self._message.edit_text(
-                text
-            )
-
+        if await self._editor.edit(text):
             self._last_text = text
-
-        except Exception:
-            return

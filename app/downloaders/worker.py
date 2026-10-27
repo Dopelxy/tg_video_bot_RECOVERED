@@ -6,12 +6,15 @@ import signal
 import sys
 import threading
 import time
+import shutil
+
+from app.services.worker_errors import classify, WorkerError
 from contextlib import redirect_stdout
 from pathlib import Path
 
 
 def emit(event: dict) -> None:
-    sys.__stdout__.write(json.dumps(event, ensure_ascii=False) + "\n")
+    sys.__stdout__.write(json.dumps(event, ensure_ascii=True) + "\n")
     sys.__stdout__.flush()
 
 
@@ -42,25 +45,44 @@ def main() -> None:
     try:
         request = json.loads(sys.stdin.readline())
         from app.downloaders.youtube import YouTubeDownloader
+        from app.downloaders.instagram import InstagramDownloader
+        from app.services.media_files import prepare_media
 
-        downloader = YouTubeDownloader()
+        downloader = InstagramDownloader() if request["action"].startswith("instagram") else YouTubeDownloader()
         url = request["url"]
         output_dir = Path(request["output_dir"])
         progress = PipeProgress()
         # yt-dlp prints diagnostics; reserve stdout for protocol messages.
         with redirect_stdout(sys.stderr):
+            if request["action"].endswith("metadata"):
+                info = downloader._extract_info_sync(url)
+                fields = ("id", "title", "uploader", "channel", "creator", "duration", "webpage_url",
+                          "vcodec", "filesize", "filesize_approx", "entries", "formats")
+                info = {k: v for k, v in info.items() if k in fields}
+                info["entries"] = bool(info.get("entries"))
+                info["formats"] = [{k: v for k, v in f.items() if k in
+                    {"height", "vcodec", "acodec", "ext", "format_id", "filesize", "filesize_approx"}}
+                    for f in (info.get("formats") or [])]
+                emit({"kind": "result", "data": info})
+                return
+            if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+                raise WorkerError("ffmpeg_missing")
             if request["action"] == "youtube_video":
                 result = downloader._download_video_sync(
                     url, int(request["max_height"]), output_dir, progress,
                 )
             elif request["action"] == "youtube_audio":
                 result = downloader._download_audio_sync(url, output_dir, progress)
+            elif request["action"] == "instagram_video":
+                result = downloader._download_video_sync(url, output_dir, progress)
             else:
                 raise ValueError("Неизвестная задача загрузки")
+        result = prepare_media(result, audio=request["action"] == "youtube_audio")
         emit({"kind": "result", "path": str(result)})
     except Exception as exc:
         # Never send exception text: extractors may include URL credentials.
-        emit({"kind": "error", "error_type": type(exc).__name__})
+        error = classify(exc)
+        emit({"kind": "error", "code": error.code, "error_type": error.error_type})
 
 
 if __name__ == "__main__":

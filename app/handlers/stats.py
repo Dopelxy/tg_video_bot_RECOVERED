@@ -1,3 +1,4 @@
+import asyncio
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -33,7 +34,7 @@ def format_bytes(
 async def stats_handler(
     message: Message,
 ) -> None:
-    stats = stats_storage.get_stats()
+    stats = await asyncio.to_thread(stats_storage.get_stats)
 
     response = (
         "📊 Статистика бота\n\n"

@@ -2,6 +2,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 import sqlite3
+import asyncio
+import logging
+from contextlib import contextmanager
+from app.paths import DATA_DIR
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -23,28 +29,31 @@ class StatsStorage:
         self._db_path = db_path
         self._lock = Lock()
 
-        self._db_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        self._initialized = False
 
-        self._initialize_database()
-
+    @contextmanager
     def _connect(
         self,
     ) -> sqlite3.Connection:
         connection = sqlite3.connect(
-            self._db_path
+            self._db_path, timeout=1
         )
 
         connection.row_factory = sqlite3.Row
 
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize_database(
         self,
     ) -> None:
         with self._lock:
+            if self._initialized:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as connection:
                 connection.execute(
                     """
@@ -97,6 +106,7 @@ class StatsStorage:
                 )
 
                 connection.commit()
+            self._initialized = True
 
     def _ensure_column(
         self,
@@ -140,6 +150,7 @@ class StatsStorage:
         self,
         file_size: int,
     ) -> None:
+        self._initialize_database()
         safe_file_size = max(
             int(file_size),
             0,
@@ -170,6 +181,7 @@ class StatsStorage:
         self,
         file_size: int,
     ) -> None:
+        self._initialize_database()
         safe_file_size = max(
             int(file_size),
             0,
@@ -200,6 +212,7 @@ class StatsStorage:
         self,
         file_size: int,
     ) -> None:
+        self._initialize_database()
         safe_file_size = max(
             int(file_size),
             0,
@@ -229,6 +242,7 @@ class StatsStorage:
     def record_failure(
         self,
     ) -> None:
+        self._initialize_database()
         with self._lock:
             with self._connect() as connection:
                 connection.execute(
@@ -246,6 +260,7 @@ class StatsStorage:
     def get_stats(
         self,
     ) -> BotStats:
+        self._initialize_database()
         with self._lock:
             with self._connect() as connection:
                 row = connection.execute(
@@ -294,5 +309,13 @@ class StatsStorage:
 
 
 stats_storage = StatsStorage(
-    db_path=Path("data") / "stats.db"
+    db_path=DATA_DIR / "stats.db"
 )
+
+async def record_safely(method, **kwargs):
+    try:
+        await asyncio.to_thread(getattr(stats_storage, method), **kwargs)
+        return True
+    except Exception as error:
+        logger.warning("Статистика не записана: operation=%s type=%s", method, type(error).__name__)
+        return False

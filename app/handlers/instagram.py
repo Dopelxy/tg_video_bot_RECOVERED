@@ -1,9 +1,6 @@
 import asyncio
 import logging
-import shutil
-import uuid
 from contextlib import suppress
-from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.types import (
@@ -28,7 +25,11 @@ from app.services.progress import (
     DownloadProgress,
     DownloadStage,
 )
-from app.storage.stats import stats_storage
+from app.storage.stats import record_safely
+from app.services.job_files import current_job, with_job
+from app.services.telegram_io import edit_status, StatusEditor, delivery_error
+from aiogram.exceptions import TelegramAPIError
+from app.services.worker_errors import WorkerError
 
 
 router = Router()
@@ -36,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 instagram_downloader = InstagramDownloader()
 
-TEMP_ROOT = Path("temp_downloads")
 
 def format_bytes(
     value: int | None,
@@ -227,6 +227,7 @@ async def update_progress_message(
     progress: DownloadProgress,
 ) -> None:
     last_text: str | None = None
+    editor = StatusEditor(status_message)
 
     while True:
         text = render_progress(
@@ -235,11 +236,8 @@ async def update_progress_message(
 
         if text != last_text:
             try:
-                await status_message.edit_text(
-                    text
-                )
-
-                last_text = text
+                if await editor.edit(text):
+                    last_text = text
 
             except Exception:
                 # Ошибка редактирования статуса
@@ -262,6 +260,7 @@ async def update_progress_message(
 @router.message(
     F.text.contains("instagram.com")
 )
+@with_job
 async def instagram_link_handler(
     message: Message,
 ) -> None:
@@ -295,13 +294,7 @@ async def instagram_link_handler(
         )
         return
 
-    job_id = uuid.uuid4().hex
-
-    output_dir = (
-        TEMP_ROOT
-        / str(user_id)
-        / job_id
-    )
+    output_dir = current_job.get()
 
     progress = DownloadProgress()
 
@@ -322,7 +315,7 @@ async def instagram_link_handler(
         )
 
         if metadata.media_type != "video":
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Пока поддерживаются "
                 "только Instagram Reels "
                 "и видеопосты."
@@ -356,7 +349,7 @@ async def instagram_link_handler(
         # Сразу показываем этап отправки,
         # не ждём следующего тика таймера.
         try:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 render_progress(
                     progress
                 )
@@ -374,19 +367,21 @@ async def instagram_link_handler(
             video_path
         )
 
-        await message.answer_video(
-            video=video_file,
-            caption=(
-                "📸 Instagram\n"
-                f"👤 "
-                f"{metadata.uploader or 'Instagram'}\n"
-                "\n"
-                f"◆ {bot_identity.name}\n"
-                f"{bot_identity.username_with_at}"
-            ),
-        )
+        async with download_coordinator.upload_semaphore:
+            await message.answer_video(
+                video=video_file,
+                caption=(
+                    "📸 Instagram\n"
+                    f"👤 "
+                    f"{metadata.uploader or 'Instagram'}\n"
+                    "\n"
+                    f"◆ {bot_identity.name}\n"
+                    f"{bot_identity.username_with_at}"
+                ),
+                request_timeout=600,
+            )
 
-        stats_storage.record_instagram_download(
+        await record_safely("record_instagram_download",
             file_size=file_size
         )
 
@@ -395,7 +390,7 @@ async def instagram_link_handler(
         )
 
         try:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "📸 Instagram\n\n"
                 "✅ Готово"
             )
@@ -403,28 +398,28 @@ async def instagram_link_handler(
             pass
 
     except InstagramDurationLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Видео слишком длинное."
         )
 
         if status_message is not None:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Видео слишком длинное.\n\n"
                 "Максимальная длительность: "
                 f"{settings.max_video_duration_seconds // 60} мин."
             )
 
     except InstagramFileSizeLimitError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Видео слишком большое."
         )
 
         if status_message is not None:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Видео слишком большое.\n\n"
                 "Максимальный размер: "
                 f"{settings.max_file_size_mb} MB."
@@ -436,13 +431,13 @@ async def instagram_link_handler(
         )
 
         if status_message is not None:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Эта ссылка Instagram "
                 "не поддерживается."
             )
 
     except InstagramMetadataError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Не удалось получить "
@@ -450,39 +445,49 @@ async def instagram_link_handler(
         )
 
         if status_message is not None:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Не удалось получить "
                 "информацию из Instagram."
             )
 
     except InstagramDownloadError:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Не удалось скачать видео."
         )
 
         if status_message is not None:
-            await status_message.edit_text(
+            await edit_status(status_message,
                 "❌ Не удалось скачать "
                 "видео из Instagram."
             )
 
+    except WorkerError as error:
+        await record_safely("record_failure")
+        progress.set_failed(str(error))
+        await edit_status(status_message, "\u274c " + str(error))
+
+    except TelegramAPIError as error:
+        await record_safely("record_failure")
+        progress.set_failed(delivery_error(error))
+        await edit_status(status_message, "\u274c " + delivery_error(error))
+
     except Exception:
-        stats_storage.record_failure()
+        await record_safely("record_failure")
 
         progress.set_failed(
             "Внутренняя ошибка."
         )
 
-        logger.exception(
+        logger.error(
             "Неожиданная ошибка "
             "при обработке Instagram"
         )
 
         if status_message is not None:
             try:
-                await status_message.edit_text(
+                await edit_status(status_message,
                     "❌ Произошла внутренняя "
                     "ошибка при обработке Instagram."
                 )
@@ -499,10 +504,6 @@ async def instagram_link_handler(
             ):
                 await progress_task
 
-        shutil.rmtree(
-            output_dir,
-            ignore_errors=True,
-        )
 
         download_coordinator.release_user(
             user_id

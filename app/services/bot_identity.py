@@ -12,7 +12,7 @@ async def load_bot_identity(
     bot: Bot,
 ) -> BotIdentity:
     try:
-        bot_info = await bot.get_me()
+        bot_info = await bot.me()  # aiogram caches identity after the first request
 
         name = (
             bot_info.first_name
@@ -38,4 +38,3 @@ async def load_bot_identity(
             name="Telegram Bot",
             username="telegram_bot",
         )
-    

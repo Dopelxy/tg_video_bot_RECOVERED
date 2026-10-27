@@ -4,12 +4,11 @@ This module contains no Qt code and does not import the bot token. A persistent
 agent can keep one instance alive independently of the desktop window.
 """
 
-import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import BinaryIO
+from app.services.process_tree import entry_command, popen_owned, stop_owned
 
 
 class BotProcess:
@@ -18,17 +17,24 @@ class BotProcess:
         self.python_executable = python_executable or sys.executable
         self.process: subprocess.Popen[bytes] | None = None
         self._log_file: BinaryIO | None = None
+        self._job = None
 
     @property
     def pid(self) -> int | None:
         process = self.process
-        return process.pid if process is not None and process.poll() is None else None
+        if process is not None and process.poll() is None:
+            return process.pid
+        if process is not None:
+            stop_owned(process, self._job)
+            self.process = None
+            self._close_log()
+        return None
 
     def start(self) -> int:
         if self.pid is not None:
             return self.pid
         if self.process is not None:
-            self.process.wait()
+            stop_owned(self.process, self._job)
             self.process = None
             self._close_log()
 
@@ -40,20 +46,10 @@ class BotProcess:
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_file = (log_dir / "runtime.log").open("ab", buffering=0)
 
-        options: dict = {}
-        if sys.platform == "win32":
-            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            options["start_new_session"] = True
-
         try:
-            self.process = subprocess.Popen(
-                [self.python_executable, "-u", str(launcher)],
-                cwd=self.project_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=self._log_file,
-                stderr=subprocess.STDOUT,
-                **options,
+            self.process, self._job = popen_owned(
+                entry_command(path=launcher, executable=self.python_executable), cwd=self.project_dir,
+                stdout=self._log_file, stderr=subprocess.STDOUT,
             )
         except BaseException:
             self._close_log()
@@ -65,43 +61,10 @@ class BotProcess:
         if process is None:
             return True
 
-        if process.poll() is None:
-            if sys.platform == "win32":
-                try:
-                    result = subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        capture_output=True,
-                        timeout=timeout,
-                        check=False,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    return False
-                if result.returncode != 0 and process.poll() is None:
-                    return False
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    return False
-
         try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if sys.platform != "win32":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    return False
-            else:
-                return False
-
+            stop_owned(process, self._job, timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
         self.process = None
         self._close_log()
         return True

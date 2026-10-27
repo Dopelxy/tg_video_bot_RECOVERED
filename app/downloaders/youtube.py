@@ -1,5 +1,5 @@
-import asyncio
 from pathlib import Path
+import math
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -13,6 +13,41 @@ from app.services.progress import (
     DownloadProgress,
 )
 from app.services.download_worker_process import run_download_worker, WorkerError
+from app.services.download_coordinator import download_coordinator
+from app.services.media_files import download_options
+from app.paths import TEMP_ROOT
+
+
+def normalize_height(value):
+    """Accept exact numeric dimensions, never round a different resolution."""
+    if isinstance(value, bool):
+        return None
+    try:
+        height = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(height) if math.isfinite(height) and height > 0 and height.is_integer() else None
+
+
+def video_format_selector(height):
+    if height not in {360, 720, 1080}:
+        raise ValueError("Неподдерживаемое качество видео")
+    # Fallback may change codec/container, never the advertised resolution.
+    exact = f"[height={height}]"
+    return (f"bestvideo{exact}[vcodec^=avc1]+bestaudio[acodec^=mp4a]"
+            f"/best{exact}[ext=mp4]"
+            f"/bestvideo{exact}+bestaudio/best{exact}")
+
+
+def selected_height(info):
+    height = normalize_height(info.get("height"))
+    if height is not None:
+        return height
+    heights = {normalize_height(f.get("height")) for f in
+               (info.get("requested_formats") or info.get("requested_downloads") or [])
+               if f.get("vcodec") not in {None, "none"}}
+    heights.discard(None)
+    return next(iter(heights)) if len(heights) == 1 else None
 
 
 class UnsupportedUrlError(ValueError):
@@ -75,11 +110,11 @@ class YouTubeDownloader:
                 "к поддерживаемым адресам YouTube"
             )
 
-        info = await asyncio.to_thread(
-            self._extract_info_sync,
-            url,
-        )
+        info = await self._get_info(url)
 
+        return self._metadata_from_info(info, url)
+
+    def _metadata_from_info(self, info, url):
         self._validate_duration(
             info
         )
@@ -111,11 +146,11 @@ class YouTubeDownloader:
                 "к поддерживаемым адресам YouTube"
             )
 
-        info = await asyncio.to_thread(
-            self._extract_info_sync,
-            url,
-        )
+        info = await self._get_info(url)
 
+        return self._formats_from_info(info)
+
+    def _formats_from_info(self, info):
         self._validate_duration(
             info
         )
@@ -131,18 +166,13 @@ class YouTubeDownloader:
         ] = {}
 
         for item in formats:
-            height = item.get(
-                "height"
-            )
+            height = normalize_height(item.get("height"))
 
             video_codec = item.get(
                 "vcodec"
             )
 
-            if not isinstance(
-                height,
-                int,
-            ):
+            if height is None:
                 continue
 
             if video_codec in {
@@ -204,6 +234,17 @@ class YouTubeDownloader:
             key=lambda item: item.height,
         )
 
+    async def _get_info(self, url):
+        if not self.supports_url(url):
+            raise UnsupportedUrlError("Ссылка не поддерживается")
+        async with download_coordinator.metadata_semaphore:
+            return await run_download_worker("youtube_metadata", url=url,
+                output_dir=TEMP_ROOT, max_height=None, progress=None, timeout=60)
+
+    async def get_details(self, url):
+        info = await self._get_info(url)
+        return self._metadata_from_info(info, url), self._formats_from_info(info)
+
     async def download_video(
         self,
         url: str,
@@ -238,11 +279,11 @@ class YouTubeDownloader:
                 output_dir=output_dir, progress=progress,
             )
         except WorkerError as error:
-            if str(error) == "YouTubeDurationLimitError":
+            if error.code == "duration_limit":
                 raise YouTubeDurationLimitError(
                     "Видео превышает разрешённую длительность"
                 ) from error
-            raise YouTubeMetadataError("Не удалось скачать видео") from error
+            raise
         except RuntimeError as error:
             raise YouTubeMetadataError("Не удалось скачать видео") from error
 
@@ -275,11 +316,11 @@ class YouTubeDownloader:
                 output_dir=output_dir, progress=progress,
             )
         except WorkerError as error:
-            if str(error) == "YouTubeDurationLimitError":
+            if error.code == "duration_limit":
                 raise YouTubeDurationLimitError(
                     "Видео превышает разрешённую длительность"
                 ) from error
-            raise YouTubeMetadataError("Не удалось скачать аудио") from error
+            raise
         except RuntimeError as error:
             raise YouTubeMetadataError("Не удалось скачать аудио") from error
 
@@ -381,21 +422,7 @@ class YouTubeDownloader:
             / "%(id)s.%(ext)s"
         )
 
-        format_selector = (
-            f"bestvideo"
-            f"[height<={max_height}]"
-            f"[vcodec^=avc1]"
-            "+bestaudio"
-            "[acodec^=mp4a]"
-            f"/best"
-            f"[height<={max_height}]"
-            f"[ext=mp4]"
-            f"/bestvideo"
-            f"[height<={max_height}]"
-            "+bestaudio"
-            f"/best"
-            f"[height<={max_height}]"
-        )
+        format_selector = video_format_selector(max_height)
 
         options = {
             "format": (
@@ -417,6 +444,9 @@ class YouTubeDownloader:
             ],
         }
 
+        budget = download_options(output_dir)
+        options["progress_hooks"] = budget.pop("progress_hooks") + options.get("progress_hooks", [])
+        options.update(budget)
         try:
             with yt_dlp.YoutubeDL(
                 options
@@ -436,10 +466,16 @@ class YouTubeDownloader:
                     info
                 )
 
+                if selected_height(info) != max_height:
+                    raise WorkerError("quality_unavailable")
+
                 info = ydl.extract_info(
                     url,
                     download=True,
                 )
+
+                if selected_height(info) != max_height:
+                    raise WorkerError("quality_unavailable")
 
                 prepared_filename = Path(
                     ydl.prepare_filename(
@@ -478,7 +514,8 @@ class YouTubeDownloader:
                 )
             )
 
-            if candidates:
+            candidates = [p for p in candidates if p.suffix.lower() in {".mp4", ".mkv", ".webm"}]
+            if len(candidates) == 1:
                 return candidates[0]
 
         raise YouTubeMetadataError(
@@ -527,6 +564,9 @@ class YouTubeDownloader:
             ],
         }
 
+        budget = download_options(output_dir)
+        options["progress_hooks"] = budget.pop("progress_hooks") + options.get("progress_hooks", [])
+        options.update(budget)
         try:
             with yt_dlp.YoutubeDL(
                 options
@@ -583,7 +623,8 @@ class YouTubeDownloader:
             )
         )
 
-        if candidates:
+        candidates = [p for p in candidates if p.suffix.lower() == ".mp3"]
+        if len(candidates) == 1:
             return candidates[0]
 
         raise YouTubeMetadataError(
@@ -600,6 +641,7 @@ class YouTubeDownloader:
             "no_warnings": True,
             "skip_download": True,
             "noplaylist": True,
+            "socket_timeout": 20, "retries": 2, "fragment_retries": 2,
         }
 
         try:

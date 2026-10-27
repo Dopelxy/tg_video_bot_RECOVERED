@@ -28,7 +28,7 @@ async def run_bot(
     dispatcher: Dispatcher,
 ) -> None:
     session = AiohttpSession(
-        proxy=settings.proxy_url
+        proxy=settings.proxy_url, timeout=600
     )
 
     bot = Bot(
@@ -42,7 +42,7 @@ async def run_bot(
     instance_id = uuid.uuid4().hex
 
     try:
-        me = await bot.get_me()
+        me = await asyncio.wait_for(bot.me(), timeout=15)
 
         print(
             "Подключились к Telegram "
@@ -66,7 +66,7 @@ async def run_bot(
         )
 
         await dispatcher.start_polling(
-            bot
+            bot, tasks_concurrency_limit=32
         )
 
     finally:
